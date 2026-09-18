@@ -1,4 +1,10 @@
-import type { ActionState, AnomalyRecord, SessionSummary } from "../src/api";
+import type {
+  ActionState,
+  AnomalyRecord,
+  HistoryGroup,
+  HistoryPage,
+  SessionSummary,
+} from "../src/api";
 
 /**
  * In-memory test double that mirrors the FastAPI lease rules:
@@ -53,6 +59,9 @@ interface EventRec {
   action_id: string;
   session_id: number | null;
   event_id: number;
+  link_id: string | null;
+  holder: string;
+  occurred_at: number;
 }
 
 const ANOMALY_CATEGORIES = ["equipment", "operation", "environment", "other"];
@@ -73,6 +82,15 @@ export class MockServer {
   sessions: SessionRec[] = [];
   /** Every executed event with the session it was attributed to (if any). */
   eventLog: EventRec[] = [];
+  /**
+   * Scripted failures for the read-only history endpoint: each entry is
+   * consumed (shift) by the next GET /api/history request, letting tests
+   * simulate a tail retry and a recognisable history_cursor_invalid reply
+   * without ever touching the in-memory event log.
+   */
+  historyFailures: { status: number; code: string; message: string }[] = [];
+  /** Groups per history page (backend default is 20; tests may shrink it). */
+  historyPageSize = 20;
   private nextSessionId = 1;
   private nextEventId = 1;
   private nextAnomalyId = 1;
@@ -81,7 +99,7 @@ export class MockServer {
     return this.sessions.find((s) => s.endedAt === null);
   }
 
-  private recordEvent(actionId: string) {
+  private recordEvent(actionId: string, linkId: string | null = null): number {
     this.events[actionId] = (this.events[actionId] ?? 0) + 1;
     const event_id = this.nextEventId++;
     this.lastEventIds[actionId] = event_id;
@@ -89,7 +107,11 @@ export class MockServer {
       action_id: actionId,
       session_id: this.activeSession()?.id ?? null,
       event_id,
+      link_id: linkId,
+      holder: this.leases[actionId]?.holder ?? "未知席位",
+      occurred_at: this.serverNow,
     });
+    return event_id;
   }
 
   /** Active session, else the most recently ended one (frozen summary). */
@@ -251,7 +273,7 @@ export class MockServer {
     const events = items.map((it) => {
       const live = this.live(it.action_id)!;
       live.executed = true;
-      this.recordEvent(it.action_id);
+      this.recordEvent(it.action_id, linkId);
       this.lastExecutedBy[it.action_id] = live.holder;
       this.links[it.action_id] = linkId;
       return {
@@ -390,10 +412,126 @@ export class MockServer {
     return { status: 200, body: { anomaly: { ...record }, state: this.state(id) } };
   }
 
+  /** Mirrors GET /api/history: newest-first groups, immutable id cursor. */
+  private handleHistory(url: string) {
+    const failure = this.historyFailures.shift();
+    if (failure) {
+      return {
+        status: failure.status,
+        body: {
+          detail: { code: failure.code, message: failure.message },
+        },
+      };
+    }
+
+    const cursorMatch = url.match(/[?&]cursor=([^&]+)/);
+    const rawCursor = cursorMatch
+      ? decodeURIComponent(cursorMatch[1])
+      : null;
+    let cursor: number | null = null;
+    if (rawCursor !== null) {
+      if (!/^[1-9][0-9]*$/.test(rawCursor.trim())) {
+        return {
+          status: 400,
+          body: {
+            detail: {
+              code: "history_cursor_invalid",
+              message: "历史分页游标非法，请重新打开执行历史",
+            },
+          },
+        };
+      }
+      cursor = parseInt(rawCursor, 10);
+    }
+
+    // Anchor: own event id for single executions, the pair's max id for the
+    // two events of one linked run — so a linked group stays adjacent even if
+    // another event's id were interleaved, exactly like the server query.
+    const linkAnchor = new Map<string, number>();
+    for (const e of this.eventLog) {
+      if (e.link_id) {
+        linkAnchor.set(
+          e.link_id,
+          Math.max(linkAnchor.get(e.link_id) ?? 0, e.event_id),
+        );
+      }
+    }
+    const anchorOf = (e: EventRec) =>
+      e.link_id ? (linkAnchor.get(e.link_id) ?? e.event_id) : e.event_id;
+
+    const ordered = [...this.eventLog]
+      .filter((e) => cursor === null || anchorOf(e) < cursor)
+      .sort(
+        (a, b) =>
+          anchorOf(b) - anchorOf(a) || b.event_id - a.event_id,
+      );
+
+    const groups: HistoryGroup[] = [];
+    const emitted = new Set<string>();
+    for (const e of ordered) {
+      if (e.link_id) {
+        if (emitted.has(e.link_id)) continue;
+        emitted.add(e.link_id);
+        const pair = this.eventLog
+          .filter((x) => x.link_id === e.link_id)
+          .sort((a, b) => a.event_id - b.event_id);
+        groups.push({ link_id: e.link_id, events: pair.map((x) => this.historyEvent(x)) });
+      } else {
+        groups.push({ link_id: null, events: [this.historyEvent(e)] });
+      }
+    }
+
+    const pageGroups = groups.slice(0, this.historyPageSize);
+    const hasMore = groups.length > this.historyPageSize;
+    const last = pageGroups[pageGroups.length - 1];
+    const nextCursor =
+      hasMore && last
+        ? String(
+            last.link_id
+              ? Math.max(...last.events.map((x) => x.event_id))
+              : last.events[0].event_id,
+          )
+        : null;
+    const page: HistoryPage = {
+      items: pageGroups,
+      next_cursor: nextCursor,
+      has_more: hasMore,
+    };
+    return { status: 200, body: page };
+  }
+
+  private historyEvent(e: EventRec) {
+    const session =
+      e.session_id != null
+        ? this.sessions.find((s) => s.id === e.session_id)
+        : undefined;
+    return {
+      event_id: e.event_id,
+      occurred_at: new Date(e.occurred_at).toISOString(),
+      action_id: e.action_id,
+      action_label: LABELS[e.action_id] ?? e.action_id,
+      holder: e.holder,
+      result: "executed",
+      link_id: e.link_id,
+      session: session
+        ? {
+            id: session.id,
+            name: session.name,
+            status: session.endedAt === null ? ("active" as const) : ("ended" as const),
+          }
+        : null,
+      anomaly: this.anomalies[e.event_id] ?? null,
+    };
+  }
+
   /** Entry point used by the mocked global fetch. */
   handle(url: string, init?: { method?: string; body?: string }) {
     const method = init?.method ?? "GET";
     const payload = init?.body ? JSON.parse(init.body) : {};
+
+    if (url.split("?")[0].endsWith("/api/history") && method === "GET") {
+      return this.handleHistory(url);
+    }
 
     if (url.endsWith("/api/actions") && method === "GET") {
       return { status: 200, body: this.all() };

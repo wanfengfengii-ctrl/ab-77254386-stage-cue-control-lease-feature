@@ -25,6 +25,13 @@ LEASE_TTL_SECONDS = 30
 # Short polling interval suggested to the UI.
 POLL_INTERVAL_MS = 1000
 
+# Read-only execution history (执行历史) keyset pagination: one page holds at
+# most this many execution GROUPS (a linked run's two events are one group),
+# newest first; the immutable event id is the page cursor.
+HISTORY_PAGE_GROUPS = 20
+# Upper bound for the optional ?limit= override (used by tests / tooling).
+HISTORY_MAX_LIMIT = 100
+
 # Dangerous actions shared by the lifting platform and the flying hoist.
 # Each action can have at most one valid lease at any instant.
 ACTION_IDS = [

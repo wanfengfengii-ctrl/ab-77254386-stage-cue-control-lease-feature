@@ -59,6 +59,41 @@ export interface SessionSummary {
   action_count: number;
 }
 
+/** Session attribution as carried by one history event. */
+export interface HistorySessionRef {
+  id: number;
+  name: string;
+  status: "active" | "ended";
+}
+
+/** One executed action event in the read-only history view. */
+export interface HistoryEvent {
+  event_id: number;
+  occurred_at: string;
+  action_id: string;
+  action_label: string;
+  holder: string;
+  result: string;
+  /** Set for the two events of one linked run; null for single executions. */
+  link_id: string | null;
+  session: HistorySessionRef | null;
+  /** The anomaly reported on this event, with its confirmation result. */
+  anomaly: AnomalyRecord | null;
+}
+
+/** One history group: a single execution or a linked run's adjacent pair. */
+export interface HistoryGroup {
+  link_id: string | null;
+  events: HistoryEvent[];
+}
+
+export interface HistoryPage {
+  items: HistoryGroup[];
+  /** Immutable event-id anchor cursor for the next (older) page. */
+  next_cursor: string | null;
+  has_more: boolean;
+}
+
 export interface LeaseGrant {
   token: string;
   holder: string;
@@ -170,6 +205,11 @@ export const api = {
 
   currentSession: () =>
     request<{ session: SessionSummary | null }>("/api/sessions/current"),
+
+  history: (cursor?: string | null) =>
+    request<HistoryPage>(
+      `/api/history${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`,
+    ),
 
   reportAnomaly: (
     actionId: string,

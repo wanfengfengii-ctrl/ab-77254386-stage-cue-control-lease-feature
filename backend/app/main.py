@@ -7,7 +7,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from . import anomalies, config, db, leases, sessions
+from . import anomalies, config, db, history, leases, sessions
 
 app = FastAPI(title="舞台联排控制权交接台", version="1.0.0")
 
@@ -115,6 +115,30 @@ def get_current_session():
     """The active session's summary, or the frozen summary of the last ended
     one — still queryable after the round is over."""
     return {"session": sessions.current_summary()}
+
+
+@app.get("/api/history")
+def get_history(cursor: str | None = None, limit: str | None = None):
+    """Read-only execution history (执行历史), newest page first.
+
+    Keyset pagination by the IMMUTABLE action-event id: new executions
+    committed while the lead pages backwards get higher ids and so can never
+    duplicate or skip an already-served record. Each item is a GROUP — one
+    single-action execution or the two adjacent events of a linked run — and
+    the event's session and anomaly record (with its confirmation result)
+    ride along. A malformed cursor is the recognisable
+    `history_cursor_invalid` business error; the console keeps its
+    already-loaded pages.
+    """
+    try:
+        return history.fetch_page(
+            cursor, None if limit is None else str(limit)
+        )
+    except history.HistoryError as exc:
+        raise HTTPException(status_code=exc.status, detail={
+            "code": exc.code,
+            "message": exc.message,
+        })
 
 
 @app.get("/api/actions/{action_id}")

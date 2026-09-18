@@ -56,6 +56,12 @@ CREATE TABLE IF NOT EXISTS action_events (
 -- A successful execution writes exactly one action event per lease.
 CREATE UNIQUE INDEX IF NOT EXISTS action_events_lease_uniq
     ON action_events(lease_id);
+-- The read-only execution history groups the two events of one linked run
+-- (shared link_id) and sorts newest-first; index the group key accordingly.
+CREATE INDEX IF NOT EXISTS action_events_link_id_idx
+    ON action_events(link_id);
+CREATE INDEX IF NOT EXISTS action_events_id_desc_idx
+    ON action_events(id DESC);
 
 -- Migration for databases created before linked execution existed.
 ALTER TABLE action_events ADD COLUMN IF NOT EXISTS link_id TEXT;

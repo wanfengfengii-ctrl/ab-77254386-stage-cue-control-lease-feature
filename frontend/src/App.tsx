@@ -6,6 +6,8 @@ import {
   type AnomalyCategory,
   type ApiError,
 } from "./api";
+import { ANOMALY_CATEGORY_LABELS } from "./anomalyLabels";
+import HistoryModal from "./HistoryModal";
 import { detectTakeover, formatClock, remainingSeconds } from "./lease";
 
 const TOKEN_KEY = "handover.tokens.v1";
@@ -34,14 +36,7 @@ function loadOrCreateConsoleId(): string {
   return id;
 }
 
-// Anomaly categories offered on the card; the stored value is the code, the
-// snapshot/poll renders this Chinese label.
-export const ANOMALY_CATEGORY_LABELS: Record<AnomalyCategory, string> = {
-  equipment: "设备异常",
-  operation: "操作异常",
-  environment: "环境异常",
-  other: "其他异常",
-};
+// Anomaly categories offered on the card (shared with the history view).
 const ANOMALY_CATEGORIES = Object.keys(
   ANOMALY_CATEGORY_LABELS,
 ) as AnomalyCategory[];
@@ -83,6 +78,7 @@ export default function App() {
   const [sessionName, setSessionName] = useState("");
   const [sessionBusy, setSessionBusy] = useState(false);
   const [sessionNotice, setSessionNotice] = useState<Notice | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [tick, setTick] = useState(0);
   const fetchStartRef = useRef<number>(Date.now());
   const seatRef = useRef(seat);
@@ -379,9 +375,21 @@ export default function App() {
 
   return (
     <main className="page">
-      <header>
-        <h1>联排控制权交接台</h1>
-        <p className="sub">升降台 × 飞行吊点 · 危险动作同一时刻仅一个有效租约（30 秒，服务端 UTC 判定）</p>
+      <header className="app-header">
+        <div>
+          <h1>联排控制权交接台</h1>
+          <p className="sub">升降台 × 飞行吊点 · 危险动作同一时刻仅一个有效租约（30 秒，服务端 UTC 判定）</p>
+        </div>
+        {/* 执行历史入口：按发生顺序追查动作执行，而不只是每张卡片的最近结果。
+            只读、独立弹窗，未填席名也可打开复盘。 */}
+        <button
+          type="button"
+          className="history-entry"
+          data-testid="btn-open-history"
+          onClick={() => setHistoryOpen(true)}
+        >
+          执行历史
+        </button>
       </header>
 
       <section className="seat-bar" data-testid="seat-bar">
@@ -489,6 +497,8 @@ export default function App() {
           </span>
         )}
       </footer>
+
+      {historyOpen && <HistoryModal onClose={() => setHistoryOpen(false)} />}
     </main>
   );
 }

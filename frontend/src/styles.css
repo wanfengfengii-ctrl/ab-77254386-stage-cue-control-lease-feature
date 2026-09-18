@@ -239,3 +239,179 @@ footer {
   font-size: 12px;
   text-align: right;
 }
+
+/* -------------------------------------------------------- history entry */
+
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+.history-entry {
+  flex: none;
+  margin-top: 2px;
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  color: #cfe0ff;
+  padding: 8px 16px;
+}
+.history-entry:hover:not(:disabled) {
+  background: rgba(59, 130, 246, 0.18);
+}
+
+/* --------------------------------------------------------- history modal */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(6, 10, 20, 0.72);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 5vh 16px;
+  z-index: 50;
+  overflow-y: auto;
+}
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  width: min(760px, 100%);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.5);
+}
+.modal-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  border-radius: 12px 12px 0 0;
+  z-index: 1;
+}
+.modal-head h2 { margin: 0; font-size: 18px; }
+.modal-hint { color: var(--muted); font-size: 12px; flex: 1; }
+.modal-close {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 22px;
+  line-height: 1;
+  padding: 2px 8px;
+}
+.modal-close:hover:not(:disabled) { border-color: var(--line); color: var(--text); }
+.modal-body { padding: 16px 20px 22px; display: flex; flex-direction: column; gap: 12px; }
+.modal-status {
+  margin: 0;
+  padding: 8px 2px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+.modal-status .notice { margin: 0 0 10px; }
+
+.history-group {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.history-group.linked {
+  border-color: rgba(59, 130, 246, 0.55);
+  background: rgba(59, 130, 246, 0.06);
+}
+.history-group-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.history-kind {
+  font-weight: 600;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 8px;
+  color: #cfe0ff;
+}
+.history-group.linked .history-kind {
+  border-color: var(--accent);
+  color: #cfe0ff;
+}
+.history-link { font-size: 12px; color: var(--muted); }
+
+.history-event {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #141b2b;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.history-event-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+.history-action { font-size: 14px; font-weight: 600; }
+.history-event-id { color: var(--muted); font-size: 12px; }
+.history-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.history-session[data-status="active"] { color: #86efac; }
+.history-session[data-status="ended"] { color: #fcd34d; }
+
+.history-anomaly {
+  border: 1px solid var(--warn);
+  border-left-width: 4px;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: rgba(245, 158, 11, 0.07);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.history-anomaly.confirmed {
+  border-color: var(--ok);
+  background: rgba(34, 197, 94, 0.07);
+}
+.history-anomaly-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+}
+.history-anomaly-tag {
+  font-weight: 600;
+  color: var(--warn);
+  border: 1px solid var(--warn);
+  border-radius: 4px;
+  padding: 0 7px;
+}
+.history-anomaly.confirmed .history-anomaly-tag { color: var(--ok); border-color: var(--ok); }
+.history-anomaly-text { margin: 0; font-size: 13px; line-height: 1.5; }
+.history-anomaly-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.history-tail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding-top: 2px;
+}
+.history-tail .notice { margin: 0; width: 100%; text-align: center; }
