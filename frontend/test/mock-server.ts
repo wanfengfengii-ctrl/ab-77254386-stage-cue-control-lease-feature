@@ -53,6 +53,9 @@ interface EventRec {
   action_id: string;
   session_id: number | null;
   event_id: number;
+  holder: string;
+  link_id: string | null;
+  occurred_at: string;
 }
 
 const ANOMALY_CATEGORIES = ["equipment", "operation", "environment", "other"];
@@ -73,6 +76,9 @@ export class MockServer {
   sessions: SessionRec[] = [];
   /** Every executed event with the session it was attributed to (if any). */
   eventLog: EventRec[] = [];
+  /** Test hooks: the next N history GETs fail (network) / return 400 cursor. */
+  historyNetworkFailuresLeft = 0;
+  historyInvalidCursor = false;
   private nextSessionId = 1;
   private nextEventId = 1;
   private nextAnomalyId = 1;
@@ -81,7 +87,7 @@ export class MockServer {
     return this.sessions.find((s) => s.endedAt === null);
   }
 
-  private recordEvent(actionId: string) {
+  private recordEvent(actionId: string, holder: string, linkId: string | null = null) {
     this.events[actionId] = (this.events[actionId] ?? 0) + 1;
     const event_id = this.nextEventId++;
     this.lastEventIds[actionId] = event_id;
@@ -89,7 +95,11 @@ export class MockServer {
       action_id: actionId,
       session_id: this.activeSession()?.id ?? null,
       event_id,
+      holder,
+      link_id: linkId,
+      occurred_at: new Date(this.serverNow).toISOString(),
     });
+    return event_id;
   }
 
   /** Active session, else the most recently ended one (frozen summary). */
@@ -251,12 +261,12 @@ export class MockServer {
     const events = items.map((it) => {
       const live = this.live(it.action_id)!;
       live.executed = true;
-      this.recordEvent(it.action_id);
+      const event_id = this.recordEvent(it.action_id, live.holder, linkId);
       this.lastExecutedBy[it.action_id] = live.holder;
       this.links[it.action_id] = linkId;
       return {
         action_id: it.action_id,
-        event_id: this.events[it.action_id],
+        event_id,
         executed_by: live.holder,
         occurred_at: new Date(this.serverNow).toISOString(),
       };
@@ -390,12 +400,118 @@ export class MockServer {
     return { status: 200, body: { anomaly: { ...record }, state: this.state(id) } };
   }
 
+  /** Mirrors GET /api/history: keyset paging, linked adjacency, ride-along. */
+  private handleHistory(query: string) {
+    const params = new URLSearchParams(query);
+    const limit = Math.max(1, Math.min(100, Number(params.get("limit") ?? 20) || 20));
+    const cursorRaw = params.get("cursor");
+    let cursor: number | null = null;
+    if (cursorRaw !== null && cursorRaw !== "") {
+      if (!/^\d+$/.test(cursorRaw) || Number(cursorRaw) <= 0) {
+        return {
+          status: 400,
+          body: {
+            detail: {
+              code: "history_cursor_invalid",
+              message: "历史分页游标无效：事件编号必须为正整数",
+            },
+          },
+        };
+      }
+      cursor = Number(cursorRaw);
+    }
+
+    // Linked members sort as ONE group on the pair's minimum event id, so an
+    // unrelated id between the members can never separate them.
+    const linkMin = new Map<string, number>();
+    for (const e of this.eventLog) {
+      if (e.link_id) {
+        linkMin.set(e.link_id, Math.min(linkMin.get(e.link_id) ?? Infinity, e.event_id));
+      }
+    }
+    const sortKey = (e: EventRec) => (e.link_id ? linkMin.get(e.link_id)! : e.event_id);
+    const ordered = [...this.eventLog]
+      .filter((e) => cursor === null || sortKey(e) < cursor)
+      .sort((a, b) => sortKey(b) - sortKey(a) || b.event_id - a.event_id);
+
+    // Over-fetch two rows so a linked mate spilling one past the page can be
+    // absorbed while one genuine older row still signals has_more.
+    const fetched = ordered.slice(0, limit + 2);
+    const page = fetched.slice(0, limit);
+    const last = page[page.length - 1];
+    if (
+      last &&
+      last.link_id &&
+      !page.some((e) => e.link_id === last.link_id && e.event_id !== last.event_id) &&
+      fetched.length > page.length &&
+      fetched[page.length].link_id === last.link_id
+    ) {
+      page.push(fetched[page.length]);
+    }
+    const hasMore = fetched.length > page.length;
+    const nextCursor = hasMore ? String(page[page.length - 1].event_id) : null;
+
+    const events = page.map((e) => {
+      const sess = e.session_id
+        ? this.sessions.find((s) => s.id === e.session_id)
+        : undefined;
+      return {
+        event_id: e.event_id,
+        occurred_at: e.occurred_at,
+        action_id: e.action_id,
+        label: LABELS[e.action_id],
+        holder: e.holder,
+        result: "executed",
+        link_id: e.link_id,
+        session: sess
+          ? {
+              id: sess.id,
+              name: sess.name,
+              status: sess.endedAt === null ? "active" : "ended",
+            }
+          : null,
+        anomaly: this.anomalies[e.event_id] ?? null,
+      };
+    });
+
+    return {
+      status: 200,
+      body: {
+        server_time: new Date(this.serverNow).toISOString(),
+        events,
+        next_cursor: nextCursor,
+        has_more: hasMore,
+      },
+    };
+  }
+
   /** Entry point used by the mocked global fetch. */
   handle(url: string, init?: { method?: string; body?: string }) {
     const method = init?.method ?? "GET";
     const payload = init?.body ? JSON.parse(init.body) : {};
 
-    if (url.endsWith("/api/actions") && method === "GET") {
+    // Read-only execution history (keyset paging + linked grouping).
+    const historyMatch = url.match(/\/api\/history(?:\?([^#]*))?$/);
+    if (historyMatch && method === "GET") {
+      if (this.historyNetworkFailuresLeft > 0) {
+        this.historyNetworkFailuresLeft--;
+        throw new Error("simulated network failure");
+      }
+      if (this.historyInvalidCursor) {
+        return {
+          status: 400,
+          body: {
+            detail: {
+              code: "history_cursor_invalid",
+              message: "历史分页游标无效：事件编号必须为正整数",
+            },
+          },
+        };
+      }
+      return this.handleHistory(historyMatch[1] ?? "");
+    }
+
+    if (url.split("?")[0].endsWith("/api/actions") && method === "GET") {
       return { status: 200, body: this.all() };
     }
 
@@ -487,13 +603,13 @@ export class MockServer {
       }
       // execute: exactly one event
       live.executed = true;
-      this.recordEvent(id);
+      const event_id = this.recordEvent(id, live.holder);
       this.lastExecutedBy[id] = live.holder;
       return {
         status: 200,
         body: {
           executed: true,
-          event_id: this.events[id],
+          event_id,
           executed_by: live.holder,
           occurred_at: new Date(this.serverNow).toISOString(),
           state: this.state(id),

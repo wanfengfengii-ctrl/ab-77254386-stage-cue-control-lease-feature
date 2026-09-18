@@ -60,6 +60,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS action_events_lease_uniq
 -- Migration for databases created before linked execution existed.
 ALTER TABLE action_events ADD COLUMN IF NOT EXISTS link_id TEXT;
 
+-- Immutable group anchor for read-only history keyset paging: a single
+-- event anchors at its own id; the two events of one linked run anchor at
+-- the PAIR'S minimum id (stamped in the same transaction). History orders by
+-- (link_anchor DESC, id DESC), so linked members are adjacent and paging is
+-- a straight backwards index walk — no full-table sort at any table size.
+ALTER TABLE action_events ADD COLUMN IF NOT EXISTS link_anchor BIGINT;
+UPDATE action_events SET link_anchor = id
+ WHERE link_anchor IS NULL AND link_id IS NULL;
+UPDATE action_events e SET link_anchor = x.anchor
+  FROM (
+      SELECT link_id, min(id) AS anchor
+        FROM action_events
+       WHERE link_id IS NOT NULL
+       GROUP BY link_id
+  ) x
+ WHERE e.link_id = x.link_id AND e.link_anchor IS NULL;
+CREATE INDEX IF NOT EXISTS action_events_history_idx
+    ON action_events (link_anchor DESC, id DESC);
+
 -- Rehearsal sessions (场次): a named round grouping the action events
 -- executed while it is active.  A session only ever moves
 -- active -> ended; it is never deleted and never reopened.

@@ -5,6 +5,7 @@ import {
   type ActionsSnapshot,
   type AnomalyCategory,
   type ApiError,
+  type HistoryEvent,
 } from "./api";
 import { detectTakeover, formatClock, remainingSeconds } from "./lease";
 
@@ -83,6 +84,10 @@ export default function App() {
   const [sessionName, setSessionName] = useState("");
   const [sessionBusy, setSessionBusy] = useState(false);
   const [sessionNotice, setSessionNotice] = useState<Notice | null>(null);
+  // The read-only execution-history drawer (执行历史): opened from the
+  // header, newest page first, older pages appended without dropping loaded
+  // rows when a later page fails.
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [tick, setTick] = useState(0);
   const fetchStartRef = useRef<number>(Date.now());
   const seatRef = useRef(seat);
@@ -379,9 +384,19 @@ export default function App() {
 
   return (
     <main className="page">
-      <header>
-        <h1>联排控制权交接台</h1>
-        <p className="sub">升降台 × 飞行吊点 · 危险动作同一时刻仅一个有效租约（30 秒，服务端 UTC 判定）</p>
+      <header className="app-head">
+        <div>
+          <h1>联排控制权交接台</h1>
+          <p className="sub">升降台 × 飞行吊点 · 危险动作同一时刻仅一个有效租约（30 秒，服务端 UTC 判定）</p>
+        </div>
+        <button
+          type="button"
+          className="history-entry"
+          data-testid="btn-open-history"
+          onClick={() => setHistoryOpen(true)}
+        >
+          执行历史
+        </button>
       </header>
 
       <section className="seat-bar" data-testid="seat-bar">
@@ -489,6 +504,8 @@ export default function App() {
           </span>
         )}
       </footer>
+
+      {historyOpen && <HistoryModal onClose={() => setHistoryOpen(false)} />}
     </main>
   );
 }
@@ -884,6 +901,298 @@ function AnomalyPanel({ state, seat, consoleId, onChanged }: AnomalyPanelProps) 
               {formError}
             </p>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 执行历史：只读、最新一页在前、可继续加载更早记录
+// ---------------------------------------------------------------------------
+
+const HISTORY_PAGE_SIZE = 20;
+
+interface HistoryModalProps {
+  onClose: () => void;
+}
+
+function HistoryModal({ onClose }: HistoryModalProps) {
+  // Loaded newest-first pages, concatenated. They are NEVER cleared when a
+  // later page fails: the lead keeps everything already on screen and only
+  // gets a retry prompt at the list tail.
+  const [events, setEvents] = useState<HistoryEvent[]>([]);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(true);
+  const [loadingFirst, setLoadingFirst] = useState(true);
+  const [firstError, setFirstError] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  // Tail prompt for a failed OLDER-page request (history_cursor_invalid is a
+  // distinct, recognisable case but keeps the loaded rows identically).
+  const [tailError, setTailError] = useState<string | null>(null);
+
+  const loadPage = useCallback(async (nextCursor: string | null) => {
+    const page = await api.history(nextCursor, HISTORY_PAGE_SIZE);
+    return page;
+  }, []);
+
+  useEffect(() => {
+    let stopped = false;
+    (async () => {
+      setLoadingFirst(true);
+      setFirstError(false);
+      try {
+        const page = await loadPage(null);
+        if (stopped) return;
+        setEvents(page.events);
+        setCursor(page.next_cursor);
+        setHasMore(page.has_more);
+      } catch {
+        if (!stopped) setFirstError(true);
+      } finally {
+        if (!stopped) setLoadingFirst(false);
+      }
+    })();
+    return () => {
+      stopped = true;
+    };
+  }, [loadPage]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const loadOlder = useCallback(async () => {
+    if (loadingMore || !cursor) return;
+    setLoadingMore(true);
+    setTailError(null);
+    const usedCursor = cursor;
+    try {
+      const page = await loadPage(usedCursor);
+      // Keep every previously loaded row; append only rows not already seen
+      // (defensive: the immutable cursor contract makes this a no-op).
+      setEvents((prev) => {
+        const known = new Set(prev.map((e) => e.event_id));
+        return [...prev, ...page.events.filter((e) => !known.has(e.event_id))];
+      });
+      setCursor(page.next_cursor);
+      setHasMore(page.has_more);
+    } catch (e) {
+      const err = e as ApiError;
+      setTailError(
+        err.code === "history_cursor_invalid"
+          ? "历史分页游标无效，已保留当前已加载记录。"
+          : "更早记录加载失败，请重试（当前结果保留）。",
+      );
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [cursor, loadingMore, loadPage]);
+
+  // Render-time grouping: the server returns a linked run's two events
+  // ADJACENT (same link_id), so one forward pass turns them into groups.
+  const groups = useMemo(() => {
+    const out: (
+      | { kind: "single"; event: HistoryEvent; key: string }
+      | { kind: "linked"; linkId: string; events: HistoryEvent[]; key: string }
+    )[] = [];
+    for (const ev of events) {
+      const top = out[out.length - 1];
+      if (
+        ev.link_id &&
+        top &&
+        top.kind === "linked" &&
+        top.linkId === ev.link_id
+      ) {
+        top.events.push(ev);
+      } else if (ev.link_id) {
+        out.push({ kind: "linked", linkId: ev.link_id, events: [ev], key: `link-${ev.link_id}` });
+      } else {
+        out.push({ kind: "single", event: ev, key: `ev-${ev.event_id}` });
+      }
+    }
+    return out;
+  }, [events]);
+
+  return (
+    <div
+      className="modal-backdrop"
+      data-testid="history-modal"
+      onMouseDown={onClose}
+    >
+      <section
+        className="history-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-label="执行历史"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="history-head">
+          <div>
+            <h2>执行历史</h2>
+            <span className="hint">按事件编号倒序 · 同一次联动相邻归组 · 异常与确认随事件展示</span>
+          </div>
+          <button
+            type="button"
+            data-testid="btn-history-close"
+            onClick={onClose}
+          >
+            关闭
+          </button>
+        </div>
+
+        <div className="history-body" data-testid="history-list">
+          {loadingFirst && (
+            <p className="history-hint" data-testid="history-loading">
+              正在加载最新一页…
+            </p>
+          )}
+
+          {!loadingFirst && firstError && (
+            <div className="history-hint" data-testid="history-load-error">
+              <p className="notice error">历史记录加载失败。</p>
+              <button
+                type="button"
+                className="primary"
+                data-testid="btn-history-retry-first"
+                onClick={() => {
+                  setLoadingFirst(true);
+                  setFirstError(false);
+                  loadPage(null)
+                    .then((page) => {
+                      setEvents(page.events);
+                      setCursor(page.next_cursor);
+                      setHasMore(page.has_more);
+                    })
+                    .catch(() => setFirstError(true))
+                    .finally(() => setLoadingFirst(false));
+                }}
+              >
+                重试
+              </button>
+            </div>
+          )}
+
+          {!loadingFirst && !firstError && events.length === 0 && (
+            <p className="history-hint" data-testid="history-empty">
+              暂无执行记录。
+            </p>
+          )}
+
+          {groups.map((g) =>
+            g.kind === "single" ? (
+              <HistoryRow key={g.key} event={g.event} />
+            ) : (
+              <div
+                key={g.key}
+                className="history-linked"
+                data-testid="history-group"
+                data-link-id={g.linkId}
+              >
+                <div className="history-linked-head" title={g.linkId}>
+                  联动执行 · 标识 {g.linkId.slice(0, 8)}… · {g.events.length} 个动作
+                </div>
+                {g.events.map((ev) => (
+                  <HistoryRow key={ev.event_id} event={ev} grouped />
+                ))}
+              </div>
+            ),
+          )}
+
+          {!loadingFirst && !firstError && events.length > 0 && hasMore && (
+            <div className="history-tail">
+              {tailError && (
+                <p className="notice error" data-testid="history-tail-error">
+                  {tailError}
+                </p>
+              )}
+              <button
+                type="button"
+                className="primary"
+                data-testid="btn-history-more"
+                disabled={loadingMore}
+                onClick={loadOlder}
+              >
+                {loadingMore
+                  ? "加载中…"
+                  : tailError
+                    ? "重试加载更早记录"
+                    : "加载更早记录"}
+              </button>
+            </div>
+          )}
+          {!loadingFirst && !firstError && !hasMore && events.length > 0 && (
+            <p className="history-hint" data-testid="history-end">
+              已到最早记录。
+            </p>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function HistoryRow({ event, grouped = false }: { event: HistoryEvent; grouped?: boolean }) {
+  return (
+    <article
+      className={`history-row${grouped ? " grouped" : ""}`}
+      data-testid="history-item"
+      data-event-id={event.event_id}
+    >
+      <div className="history-row-head">
+        <span className="history-event-no">#{event.event_id}</span>
+        <span className="history-action">{event.label}</span>
+        <span className="history-seat">席位：{event.holder}</span>
+        <span className="history-time" data-testid="history-time">
+          {formatClock(event.occurred_at)} UTC
+        </span>
+      </div>
+      {event.session && (
+        <div className="history-tags">
+          <span
+            className={`history-session ${event.session.status}`}
+            data-testid="history-session"
+          >
+            场次「{event.session.name}」·{" "}
+            {event.session.status === "active" ? "进行中" : "已结束"}
+          </span>
+        </div>
+      )}
+      {event.anomaly && <HistoryAnomaly anomaly={event.anomaly} />}
+    </article>
+  );
+}
+
+function HistoryAnomaly({ anomaly }: { anomaly: HistoryEvent["anomaly"] }) {
+  if (!anomaly) return null;
+  return (
+    <div
+      className={`history-anomaly ${anomaly.status}`}
+      data-testid="history-anomaly"
+      data-status={anomaly.status}
+    >
+      <div className="history-anomaly-head">
+        <span className="anomaly-tag">
+          {ANOMALY_CATEGORY_LABELS[anomaly.category as AnomalyCategory] ??
+            anomaly.category}
+        </span>
+        <span className="anomaly-status">
+          {anomaly.status === "pending" ? "异常待确认" : "异常已确认"}
+        </span>
+      </div>
+      <p className="anomaly-text">{anomaly.description}</p>
+      <div className="anomaly-meta">
+        <span>报告人：{anomaly.reported_by}</span>
+        <span>报告时间：{formatClock(anomaly.reported_at)} UTC</span>
+      </div>
+      {anomaly.status === "confirmed" && (
+        <div className="anomaly-meta" data-testid="history-anomaly-confirmation">
+          <span>确认席位：{anomaly.confirmed_by}</span>
+          <span>确认时间：{formatClock(anomaly.confirmed_at)} UTC</span>
         </div>
       )}
     </div>

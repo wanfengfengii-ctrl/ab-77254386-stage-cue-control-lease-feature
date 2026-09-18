@@ -213,7 +213,10 @@ def execute(action_id: str, token: str) -> dict[str, Any]:
                 # any) inside the same transaction.
                 session_id = db.active_session_id(conn)
                 # Unique index on lease_id makes double-write impossible even
-                # at the SQL level.
+                # at the SQL level. The history anchor is stamped afterwards
+                # in the SAME transaction (single events: own id; linked run:
+                # the pair's minimum id), keeping history paging on the
+                # immutable (link_anchor, id) index.
                 event = conn.execute(
                     """
                     INSERT INTO action_events
@@ -231,6 +234,10 @@ def execute(action_id: str, token: str) -> dict[str, Any]:
                         session_id,
                     ),
                 ).fetchone()
+                conn.execute(
+                    "UPDATE action_events SET link_anchor = id WHERE id = %s",
+                    (event["id"],),
+                )
                 state = db.state_for(conn, action_id, now)
         except psycopg.errors.UniqueViolation:
             # Defensive: an event already exists for this lease.
@@ -352,6 +359,14 @@ def execute_linked(items: list[dict[str, str]]) -> dict[str, Any]:
                             "occurred_at": event["occurred_at"].isoformat(),
                         }
                     )
+                # Both members anchor at the pair's minimum id so history
+                # orders and pages them as one adjacent, unsplittable group.
+                anchor = min(ev["event_id"] for ev in events)
+                conn.execute(
+                    "UPDATE action_events SET link_anchor = %s"
+                    " WHERE id = ANY(%s)",
+                    (anchor, [ev["event_id"] for ev in events]),
+                )
                 states = {aid: db.state_for(conn, aid, now) for aid in ordered}
         except psycopg.errors.UniqueViolation:
             # Defensive: an event already exists for one of these leases.

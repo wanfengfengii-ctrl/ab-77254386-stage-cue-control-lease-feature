@@ -7,7 +7,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from . import anomalies, config, db, leases, sessions
+from . import anomalies, config, db, history, leases, sessions
 
 app = FastAPI(title="舞台联排控制权交接台", version="1.0.0")
 
@@ -115,6 +115,31 @@ def get_current_session():
     """The active session's summary, or the frozen summary of the last ended
     one — still queryable after the round is over."""
     return {"session": sessions.current_summary()}
+
+
+@app.get("/api/history")
+def get_history(cursor: str | None = None, limit: int | None = None):
+    """Read-only execution history, newest page first (执行历史).
+
+    Keyset paging uses the immutable action-event id as cursor: each response
+    carries next_cursor (the oldest returned event id), and rows written
+    while the lead pages backwards never duplicate or skip old records. A
+    linked run's two events come back adjacent and groupable. An invalid
+    cursor is a recognisable history_cursor_invalid and changes nothing.
+    """
+    try:
+        page = history.list_page(cursor, limit)
+    except history.HistoryError as exc:
+        raise HTTPException(status_code=exc.status, detail={
+            "code": exc.code,
+            "message": exc.message,
+        })
+    return {
+        "server_time": _iso_now(),
+        "events": page["events"],
+        "next_cursor": page["next_cursor"],
+        "has_more": page["has_more"],
+    }
 
 
 @app.get("/api/actions/{action_id}")

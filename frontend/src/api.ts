@@ -68,6 +68,37 @@ export interface LeaseGrant {
   state: ActionState;
 }
 
+/** A session as carried alongside each history event (id/name/status only). */
+export interface HistorySession {
+  id: number;
+  name: string;
+  status: "active" | "ended";
+}
+
+/** One immutable execution row from the read-only execution history. */
+export interface HistoryEvent {
+  event_id: number;
+  occurred_at: string;
+  action_id: string;
+  label: string;
+  holder: string;
+  result: string;
+  /** Shared across the two events of one linked run; null for a single run. */
+  link_id: string | null;
+  session: HistorySession | null;
+  /** The anomaly reported on THIS event, with its confirmation if any. */
+  anomaly: AnomalyRecord | null;
+}
+
+export interface HistoryPage {
+  server_time: string;
+  /** Newest-first rows; the two events of a linked run are adjacent. */
+  events: HistoryEvent[];
+  /** Immutable event-id anchor of the next older page; null at the end. */
+  next_cursor: string | null;
+  has_more: boolean;
+}
+
 export interface ApiError extends Error {
   code: string;
   status: number;
@@ -170,6 +201,11 @@ export const api = {
 
   currentSession: () =>
     request<{ session: SessionSummary | null }>("/api/sessions/current"),
+
+  history: (cursor?: string | null, limit = 20) =>
+    request<HistoryPage>(
+      `/api/history?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+    ),
 
   reportAnomaly: (
     actionId: string,
